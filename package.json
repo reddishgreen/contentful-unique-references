@@ -1,0 +1,31 @@
+{
+  "name": "contentful-unique-references-app",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "start": "parcel src/index.html",
+    "build": "parcel build src/index.html --no-scope-hoist --public-url ."
+  },
+  "dependencies": {
+    "@contentful/app-sdk": "^4.23.0",
+    "@contentful/f36-components": "^4.56.0",
+    "@contentful/f36-icons": "^4.0.0",
+    "@contentful/f36-tokens": "^4.0.0",
+    "@emotion/react": "^11.11.0",
+    "@emotion/styled": "^11.11.0",
+    "@hello-pangea/dnd": "^16.3.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0"
+  },
+  "devDependencies": {
+    "@types/react": "^18.2.0",
+    "@types/react-dom": "^18.2.0",
+    "buffer": "^6.0.3",
+    "parcel": "^2.9.0",
+    "process": "^0.11.10",
+    "typescript": "^5.5.3"
+  },
+  "browserslist": [
+    "last 2 Chrome versions"
+  ]
+}
