@@ -52,6 +52,7 @@ const Field = ({ sdk }: { sdk: FieldAppSDK }) => {
   const [contentTypes, setContentTypes] = useState<Record<string, ContentType>>({});
   const [allowedTypes, setAllowedTypes] = useState<ContentType[]>([]);
   const [isLoading, setIsLoading] = useState(false);
+  const [isMenuOpen, setIsMenuOpen] = useState(false);
 
   // Ref to track if we navigated away to edit/create an entry
   const isNavigatingRef = useRef(false);
@@ -206,18 +207,15 @@ const Field = ({ sdk }: { sdk: FieldAppSDK }) => {
       await sdk.field.setValue(links);
   };
 
-  // Check if an entry is already linked from another entry of the same content type
+  // Check if an entry is already linked from any other entry (across all content types)
   const findExistingLinks = useCallback(async (entryId: string): Promise<LinkedFromEntry[]> => {
       try {
           const currentEntryId = sdk.entry.getSys().id;
-          const currentContentTypeId = sdk.contentType.sys.id;
-          const currentFieldId = sdk.field.id;
 
-          // Find all entries that link to this entry
+          // Find ALL entries that link to this entry (any content type)
           const result = await sdk.cma.entry.getMany({
               query: {
                   'links_to_entry': entryId,
-                  'sys.contentType.sys.id': currentContentTypeId,
                   limit: 100
               }
           });
@@ -228,25 +226,26 @@ const Field = ({ sdk }: { sdk: FieldAppSDK }) => {
               // Skip current entry
               if (entry.sys.id === currentEntryId) continue;
 
-              // Check if the link is in the same field
-              const fieldValue = entry.fields[currentFieldId];
-              if (!fieldValue) continue;
+              // Check all fields in the entry for the link
+              for (const [fieldId, fieldValue] of Object.entries(entry.fields)) {
+                  if (!fieldValue) continue;
 
-              // Check each locale
-              for (const [locale, value] of Object.entries(fieldValue)) {
-                  const links = Array.isArray(value) ? value : [value];
-                  const hasLink = links.some((link: any) =>
-                      link?.sys?.type === 'Link' &&
-                      link?.sys?.linkType === 'Entry' &&
-                      link?.sys?.id === entryId
-                  );
+                  // Check each locale
+                  for (const [locale, value] of Object.entries(fieldValue)) {
+                      const links = Array.isArray(value) ? value : [value];
+                      const hasLink = links.some((link: any) =>
+                          link?.sys?.type === 'Link' &&
+                          link?.sys?.linkType === 'Entry' &&
+                          link?.sys?.id === entryId
+                      );
 
-                  if (hasLink) {
-                      linkedFrom.push({
-                          entry: entry as Entry,
-                          fieldId: currentFieldId,
-                          locale
-                      });
+                      if (hasLink) {
+                          linkedFrom.push({
+                              entry: entry as Entry,
+                              fieldId,
+                              locale
+                          });
+                      }
                   }
               }
           }
@@ -496,9 +495,13 @@ const Field = ({ sdk }: { sdk: FieldAppSDK }) => {
       return duplicates;
   }, [items]);
 
+  // Calculate minimum height - expand when menu is open to fit dropdown
+  const menuHeight = allowedTypes.length * 36 + 100; // Estimate: 36px per item + header/footer
+  const minHeight = isMenuOpen ? `${Math.max(menuHeight, 250)}px` : undefined;
+
   return (
-    <div 
-        style={{ minHeight: '400px' }} 
+    <div
+        style={{ minHeight }}
         onMouseEnter={handleMouseEnter} // Trigger refresh when mouse enters the app area
     >
     <style>{`
@@ -654,7 +657,7 @@ const Field = ({ sdk }: { sdk: FieldAppSDK }) => {
           border: '1px dashed #cfd9e0',
           borderRadius: '6px'
       }}>
-          <Menu placement="bottom">
+          <Menu placement="bottom" isOpen={isMenuOpen} onOpen={() => setIsMenuOpen(true)} onClose={() => setIsMenuOpen(false)}>
             <Menu.Trigger>
                 <Button variant="secondary" size="small" endIcon={<ChevronDownIcon />} startIcon={<PlusIcon />}>
                     Add content
