@@ -39,6 +39,12 @@ interface ContentType {
   displayField: string;
 }
 
+interface LinkedFromEntry {
+  entry: Entry;
+  fieldId: string;
+  locale: string;
+}
+
 const Field = ({ sdk }: { sdk: FieldAppSDK }) => {
   // State now holds LocalItem[] instead of Link[]
   const [items, setItems] = useState<LocalItem[]>([]);
@@ -46,7 +52,7 @@ const Field = ({ sdk }: { sdk: FieldAppSDK }) => {
   const [contentTypes, setContentTypes] = useState<Record<string, ContentType>>({});
   const [allowedTypes, setAllowedTypes] = useState<ContentType[]>([]);
   const [isLoading, setIsLoading] = useState(false);
-  
+
   // Ref to track if we navigated away to edit/create an entry
   const isNavigatingRef = useRef(false);
 
@@ -200,6 +206,110 @@ const Field = ({ sdk }: { sdk: FieldAppSDK }) => {
       await sdk.field.setValue(links);
   };
 
+  // Check if an entry is already linked from another entry of the same content type
+  const findExistingLinks = useCallback(async (entryId: string): Promise<LinkedFromEntry[]> => {
+      try {
+          const currentEntryId = sdk.entry.getSys().id;
+          const currentContentTypeId = sdk.contentType.sys.id;
+          const currentFieldId = sdk.field.id;
+
+          // Find all entries that link to this entry
+          const result = await sdk.cma.entry.getMany({
+              query: {
+                  'links_to_entry': entryId,
+                  'sys.contentType.sys.id': currentContentTypeId,
+                  limit: 100
+              }
+          });
+
+          const linkedFrom: LinkedFromEntry[] = [];
+
+          for (const entry of result.items) {
+              // Skip current entry
+              if (entry.sys.id === currentEntryId) continue;
+
+              // Check if the link is in the same field
+              const fieldValue = entry.fields[currentFieldId];
+              if (!fieldValue) continue;
+
+              // Check each locale
+              for (const [locale, value] of Object.entries(fieldValue)) {
+                  const links = Array.isArray(value) ? value : [value];
+                  const hasLink = links.some((link: any) =>
+                      link?.sys?.type === 'Link' &&
+                      link?.sys?.linkType === 'Entry' &&
+                      link?.sys?.id === entryId
+                  );
+
+                  if (hasLink) {
+                      linkedFrom.push({
+                          entry: entry as Entry,
+                          fieldId: currentFieldId,
+                          locale
+                      });
+                  }
+              }
+          }
+
+          return linkedFrom;
+      } catch (error) {
+          console.error('Error checking existing links:', error);
+          return [];
+      }
+  }, [sdk]);
+
+  // Remove a link from another entry
+  const removeLinkFromEntry = useCallback(async (
+      sourceEntryId: string,
+      fieldId: string,
+      locale: string,
+      targetEntryId: string
+  ): Promise<boolean> => {
+      try {
+          // Get the latest version of the entry
+          const entry = await sdk.cma.entry.get({ entryId: sourceEntryId });
+
+          const fieldValue = entry.fields[fieldId]?.[locale];
+          if (!fieldValue) return false;
+
+          const links = Array.isArray(fieldValue) ? fieldValue : [fieldValue];
+
+          // Update the field
+          entry.fields[fieldId][locale] = links.filter((link: any) =>
+              !(link?.sys?.type === 'Link' &&
+                link?.sys?.linkType === 'Entry' &&
+                link?.sys?.id === targetEntryId)
+          );
+
+          // Save the entry
+          await sdk.cma.entry.update({ entryId: sourceEntryId }, entry);
+
+          return true;
+      } catch (error) {
+          console.error('Error removing link from entry:', error);
+          return false;
+      }
+  }, [sdk.cma]);
+
+  // Get entry title for display
+  const getEntryTitle = useCallback(async (entry: Entry): Promise<string> => {
+      try {
+          const contentTypeId = entry.sys.contentType.sys.id;
+          const ct = contentTypes[contentTypeId] || await sdk.cma.contentType.get({ contentTypeId });
+          const displayField = ct.displayField;
+
+          if (entry.fields[displayField]) {
+              const localeValue = entry.fields[displayField][sdk.field.locale];
+              if (localeValue) return localeValue;
+              const firstValue = Object.values(entry.fields[displayField])[0];
+              if (firstValue) return firstValue as string;
+          }
+          return 'Untitled';
+      } catch {
+          return 'Untitled';
+      }
+  }, [sdk, contentTypes]);
+
   const onAddExisting = async () => {
     try {
       const currentIds = new Set(items.map((item) => item.link.sys.id));
@@ -218,13 +328,63 @@ const Field = ({ sdk }: { sdk: FieldAppSDK }) => {
 
       // Explicitly type entry to avoid TS errors
       const newEntries = selectedEntries.filter((entry: any) => !currentIds.has(entry.sys.id));
-      
+
       if (newEntries.length === 0 && selectedEntries.length > 0) {
         sdk.notifier.warning('All selected entries are already added.');
         return;
       }
 
-      const newLocalItems: LocalItem[] = newEntries.map((entry: any) => ({
+      // Check each entry for existing links
+      const entriesToAdd: any[] = [];
+      const entriesToMove: { entry: any; linkedFrom: LinkedFromEntry }[] = [];
+
+      for (const entry of newEntries as any[]) {
+          const existingLinks = await findExistingLinks(entry.sys.id);
+
+          if (existingLinks.length > 0) {
+              // Entry is already linked somewhere else
+              entriesToMove.push({ entry, linkedFrom: existingLinks[0] });
+          } else {
+              entriesToAdd.push(entry);
+          }
+      }
+
+      // Handle entries that need to be moved
+      for (const { entry, linkedFrom } of entriesToMove) {
+          const entryTitle = await getEntryTitle(entry);
+          const sourceEntryTitle = await getEntryTitle(linkedFrom.entry);
+
+          const confirmed = await sdk.dialogs.openConfirm({
+              title: 'Entry already linked',
+              message: `"${entryTitle}" is already linked to "${sourceEntryTitle}". Do you want to move it to this entry? It will be removed from "${sourceEntryTitle}".`,
+              intent: 'primary',
+              confirmLabel: 'Move here',
+              cancelLabel: 'Skip'
+          });
+
+          if (confirmed) {
+              // Remove from source entry
+              const removed = await removeLinkFromEntry(
+                  linkedFrom.entry.sys.id,
+                  linkedFrom.fieldId,
+                  linkedFrom.locale,
+                  entry.sys.id
+              );
+
+              if (removed) {
+                  entriesToAdd.push(entry);
+                  sdk.notifier.success(`Moved "${entryTitle}" from "${sourceEntryTitle}".`);
+              } else {
+                  sdk.notifier.error(`Failed to move "${entryTitle}". Please try again.`);
+              }
+          }
+      }
+
+      if (entriesToAdd.length === 0) {
+          return;
+      }
+
+      const newLocalItems: LocalItem[] = entriesToAdd.map((entry: any) => ({
         uniqueId: generateUniqueId(),
         link: {
             sys: {
@@ -237,9 +397,9 @@ const Field = ({ sdk }: { sdk: FieldAppSDK }) => {
 
       const updatedItems = [...items, ...newLocalItems];
       await updateFieldValue(updatedItems);
-      
-      if (newEntries.length < selectedEntries.length) {
-        sdk.notifier.success(`Added ${newEntries.length} entries. Duplicates were skipped.`);
+
+      if (entriesToAdd.length < selectedEntries.length && entriesToMove.length === 0) {
+        sdk.notifier.success(`Added ${entriesToAdd.length} entries. Duplicates were skipped.`);
       }
     } catch (error) {
       console.error(error);
